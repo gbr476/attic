@@ -18,11 +18,16 @@ use serde::Deserialize;
 use crate::config::ServerConfig;
 use crate::version::ATTIC_DISTRIBUTOR;
 use attic::api::v1::cache_config::{CacheConfig, CreateCacheRequest};
+use attic::api::v1::chunked_upload::{
+    ATTIC_CHUNK_HASH, AttachChunksRequest, AttachChunksResponse, BeginChunkedUploadRequest,
+    BeginChunkedUploadResponse, ChunkInfo, FinishChunkedUploadRequest, UploadChunkResponse,
+};
 use attic::api::v1::get_missing_paths::{GetMissingPathsRequest, GetMissingPathsResponse};
 use attic::api::v1::upload_path::{
     ATTIC_NAR_INFO, ATTIC_NAR_INFO_PREAMBLE_SIZE, UploadPathNarInfo, UploadPathResult,
 };
 use attic::cache::CacheName;
+use attic::hash::Hash;
 use attic::nix_store::StorePathHash;
 
 /// The User-Agent string of Attic.
@@ -54,7 +59,6 @@ pub enum ApiError {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StructuredApiError {
-    #[allow(dead_code)]
     code: u16,
     error: String,
     message: String,
@@ -211,11 +215,92 @@ impl ApiClient {
             Err(api_error.into())
         }
     }
+
+    /// Starts a chunked upload.
+    pub async fn begin_chunked_upload(
+        &self,
+        nar_info: UploadPathNarInfo,
+    ) -> Result<BeginChunkedUploadResponse> {
+        let endpoint = self.endpoint.join("_api/v1/upload-path/chunked")?;
+        let payload = BeginChunkedUploadRequest { nar_info };
+
+        let res = self.client.post(endpoint).json(&payload).send().await?;
+        Self::json_or_error(res).await
+    }
+
+    /// Attaches the chunks the server already has, returning the missing ones.
+    pub async fn attach_chunks(
+        &self,
+        upload_id: &str,
+        chunks: Vec<ChunkInfo>,
+    ) -> Result<AttachChunksResponse> {
+        let endpoint = self
+            .endpoint
+            .join(&format!("_api/v1/upload-path/chunked/{upload_id}/chunks"))?;
+        let payload = AttachChunksRequest { chunks };
+
+        let res = self.client.post(endpoint).json(&payload).send().await?;
+        Self::json_or_error(res).await
+    }
+
+    /// Uploads one chunk of a chunked upload.
+    pub async fn upload_chunk(
+        &self,
+        upload_id: &str,
+        seq: u32,
+        hash: &Hash,
+        data: Bytes,
+    ) -> Result<UploadChunkResponse> {
+        let endpoint = self.endpoint.join(&format!(
+            "_api/v1/upload-path/chunked/{upload_id}/chunk/{seq}"
+        ))?;
+
+        let res = self
+            .client
+            .put(endpoint)
+            .header(ATTIC_CHUNK_HASH, hash.to_typed_base16())
+            .body(data)
+            .send()
+            .await?;
+        Self::json_or_error(res).await
+    }
+
+    /// Finishes a chunked upload.
+    pub async fn finish_chunked_upload(
+        &self,
+        upload_id: &str,
+        num_chunks: u32,
+    ) -> Result<UploadPathResult> {
+        let endpoint = self
+            .endpoint
+            .join(&format!("_api/v1/upload-path/chunked/{upload_id}/finish"))?;
+        let payload = FinishChunkedUploadRequest { num_chunks };
+
+        let res = self.client.post(endpoint).json(&payload).send().await?;
+        Self::json_or_error(res).await
+    }
+
+    async fn json_or_error<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
+        if res.status().is_success() {
+            Ok(res.json().await?)
+        } else {
+            let api_error = ApiError::try_from_response(res).await?;
+            Err(api_error.into())
+        }
+    }
 }
 
 impl StdError for ApiError {}
 
 impl ApiError {
+    /// Returns whether retrying the request may succeed (a server error).
+    pub fn is_server_error(&self) -> bool {
+        match self {
+            Self::Structured(e) => e.code >= 500,
+            Self::Unstructured(status, _) => status.is_server_error(),
+        }
+    }
+
     async fn try_from_response(response: Response) -> Result<Self> {
         let status = response.status();
         let text = response.text().await?;

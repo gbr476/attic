@@ -32,6 +32,7 @@ serde_json = "1.0.140"
 toml = "1.1.2"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+tokio-util = { version = "0.7.15", features = [ "io" ] }
 xdg = "3.0.0"
 
 [dependencies.tokio]

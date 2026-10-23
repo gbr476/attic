@@ -38,6 +38,14 @@ pub struct WatchStore {
     /// Always send the upload info as part of the payload.
     #[clap(long, hide = true)]
     force_preamble: bool,
+
+    /// Upload every path as a whole, even if the server supports chunked uploads.
+    #[clap(long)]
+    no_chunked_upload: bool,
+
+    /// The maximum number of parallel chunk uploads per path (chunked uploads).
+    #[clap(long, default_value = "4")]
+    chunk_jobs: usize,
 }
 
 pub async fn run(opts: Opts) -> Result<()> {
@@ -65,6 +73,8 @@ pub async fn run(opts: Opts) -> Result<()> {
     let push_config = PushConfig {
         num_workers: sub.jobs,
         force_preamble: sub.force_preamble,
+        chunked_upload: !sub.no_chunked_upload,
+        chunk_jobs: sub.chunk_jobs,
     };
 
     let push_session_config = PushSessionConfig {
