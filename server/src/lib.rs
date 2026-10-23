@@ -37,9 +37,8 @@ use axum::{
     extract::Extension,
     http::{Uri, uri::Scheme},
 };
-use sea_orm::{
-    ConnectionTrait, Database, DatabaseConnection, DatabaseConnectionType, query::Statement,
-};
+use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, query::Statement};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use tokio::time;
@@ -109,30 +108,9 @@ impl StateInner {
     async fn database(&self) -> ServerResult<&DatabaseConnection> {
         self.database
             .get_or_try_init(|| async {
-                let db = Database::connect(&self.config.database.url)
+                Database::connect(database_connect_options(&self.config.database.url))
                     .await
-                    .map_err(ServerError::database_error);
-                if let Ok(db_conn) = &db
-                    && let DatabaseConnectionType::SqlxSqlitePoolConnection(conn) = &db_conn.inner
-                {
-                    // execute some sqlite-specific performance optimizations
-                    // see https://phiresky.github.io/blog/2020/sqlite-performance-tuning/ for
-                    // more details
-                    // intentionally ignore errors from this: this is purely for performance,
-                    // not for correctness, so we can live without this
-                    _ = conn
-                        .execute_unprepared(
-                            "
-                        pragma journal_mode=WAL;
-                        pragma synchronous=normal;
-                        pragma temp_store=memory;
-                        pragma mmap_size = 30000000000;
-                        ",
-                        )
-                        .await;
-                }
-
-                db
+                    .map_err(ServerError::database_error)
             })
             .await
     }
@@ -284,4 +262,73 @@ pub async fn run_migrations(config: Config) -> Result<()> {
     Migrator::up(db, None).await?;
 
     Ok(())
+}
+
+/// Connection options for the server database.
+fn database_connect_options(url: &str) -> ConnectOptions {
+    let mut options = ConnectOptions::new(url);
+
+    // SQLite-specific performance tuning, see
+    // https://phiresky.github.io/blog/2020/sqlite-performance-tuning/
+    //
+    // All but journal_mode are per-connection settings, so they are set on
+    // every connection the pool opens. Running them once after connecting only
+    // reached the connection open at that moment: sea-orm gives SQLite a pool
+    // of one connection, and sqlx replaces it after 10 min idle or 30 min of
+    // age, so within half an hour the server ran on SQLite's default
+    // synchronous=FULL, an fsync per commit. On slow storage that caps write
+    // throughput (an upload commits several times per chunk), every request
+    // queues behind the single connection, and they fail with "Connection pool
+    // timed out". synchronous=NORMAL is safe in WAL mode: the database cannot
+    // be corrupted, only the latest commits can be lost on power failure.
+    options
+        .map_sqlx_sqlite_opts(|opts| {
+            opts.journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal)
+                .pragma("temp_store", "memory")
+                .pragma("mmap_size", "30000000000")
+                // sqlx's default is 5 s; wait rather than fail under bursts
+                .busy_timeout(Duration::from_secs(30))
+        })
+        // sqlx's default is 30 s
+        .acquire_timeout(Duration::from_secs(120));
+
+    options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every connection the pool opens must come up tuned, not just the first
+    /// one: sqlx replaces pooled connections after an idle period or a maximum
+    /// lifetime, so pragmas executed once after connecting are lost.
+    #[tokio::test]
+    async fn sqlite_connections_are_tuned() {
+        let path = std::env::temp_dir().join(format!("attic-db-test-{}.db", std::process::id()));
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+
+        let db = Database::connect(database_connect_options(&url))
+            .await
+            .unwrap();
+
+        async fn pragma(db: &DatabaseConnection, name: &str) -> String {
+            let stmt = Statement::from_string(db.get_database_backend(), format!("PRAGMA {name}"));
+            let row = db.query_one_raw(stmt).await.unwrap().unwrap();
+            row.try_get_by_index::<i64>(0)
+                .map(|v| v.to_string())
+                .or_else(|_| row.try_get_by_index::<String>(0))
+                .unwrap()
+        }
+
+        assert_eq!(pragma(&db, "journal_mode").await, "wal");
+        assert_eq!(pragma(&db, "synchronous").await, "1"); // NORMAL
+        assert_eq!(pragma(&db, "temp_store").await, "2"); // MEMORY
+        assert_eq!(pragma(&db, "busy_timeout").await, "30000");
+
+        db.close().await.unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
 }
