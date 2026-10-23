@@ -156,11 +156,7 @@ impl StorageBackend for LocalBackend {
     }
 
     async fn delete_file(&self, name: String) -> ServerResult<()> {
-        fs::remove_file(self.get_path(&name))
-            .await
-            .map_err(ServerError::storage_error)?;
-
-        Ok(())
+        remove_file_if_exists(&self.get_path(&name)).await
     }
 
     async fn delete_file_db(&self, file: &RemoteFile) -> ServerResult<()> {
@@ -173,11 +169,7 @@ impl StorageBackend for LocalBackend {
             .into());
         };
 
-        fs::remove_file(self.get_path(&file.name))
-            .await
-            .map_err(ServerError::storage_error)?;
-
-        Ok(())
+        remove_file_if_exists(&self.get_path(&file.name)).await
     }
 
     async fn download_file_db(
@@ -203,5 +195,48 @@ impl StorageBackend for LocalBackend {
 
     async fn make_db_reference(&self, name: String) -> ServerResult<RemoteFile> {
         Ok(RemoteFile::Local(LocalRemoteFile { name }))
+    }
+}
+
+/// Removes a stored file, treating one that is already gone as removed.
+///
+/// Deletion is idempotent: the goal is that the file no longer exists. Failing
+/// on `NotFound` instead leaves the database row (e.g. a chunk in the Deleted
+/// state) behind forever, and since garbage collection picks the oldest
+/// Deleted chunks first, a single batch of such rows stops all further
+/// reaping.
+async fn remove_file_if_exists(path: &Path) -> ServerResult<()> {
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            tracing::warn!("File to delete is already gone: {}", path.display());
+            Ok(())
+        }
+        Err(e) => Err(ServerError::storage_error(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remove_file_if_exists_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("attic-local-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).await.unwrap();
+
+        // An existing file is removed.
+        let file = dir.join("chunk");
+        fs::write(&file, b"data").await.unwrap();
+        remove_file_if_exists(&file).await.unwrap();
+        assert!(!file.exists());
+
+        // A file that is already gone counts as removed.
+        remove_file_if_exists(&file).await.unwrap();
+
+        // Any other error is still reported (here: the path is a directory).
+        assert!(remove_file_if_exists(&dir).await.is_err());
+
+        fs::remove_dir(&dir).await.unwrap();
     }
 }
