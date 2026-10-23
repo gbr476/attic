@@ -15,6 +15,7 @@ use crate::{RequestState, State};
 use attic::api::v1::cache_config::{
     CacheConfig, CreateCacheRequest, KeypairConfig, RetentionPeriodConfig,
 };
+use attic::api::v1::chunked_upload::ChunkedUploadConfig;
 use attic::cache::CacheName;
 use attic::signing::NixKeypair;
 
@@ -51,6 +52,16 @@ pub(crate) async fn get_cache_config(
         priority: Some(cache.priority),
         upstream_cache_key_names: Some(cache.upstream_cache_key_names.0),
         retention_period: Some(retention_period_config),
+        chunked_upload: state
+            .config
+            .chunked_upload_available()
+            .then(|| ChunkedUploadConfig {
+                nar_size_threshold: state.config.chunking.nar_size_threshold,
+                min_size: state.config.chunking.min_size,
+                avg_size: state.config.chunking.avg_size,
+                max_size: state.config.chunking.max_size,
+                max_chunks_per_request: state.config.chunked_upload.max_chunks_per_request,
+            }),
     }))
 }
 

@@ -72,6 +72,7 @@ pub async fn run_garbage_collection_once(config: Config) -> Result<()> {
     let state = StateInner::new(config).await;
     run_time_based_garbage_collection(&state).await?;
     run_reap_orphan_nars(&state).await?;
+    run_reap_stale_pending_nars(&state).await?;
     run_reap_orphan_chunks(&state).await?;
 
     Ok(())
@@ -165,6 +166,32 @@ async fn run_reap_orphan_nars(state: &State) -> Result<()> {
         .await?;
 
     tracing::info!("Deleted {} orphan NARs", deletion.rows_affected,);
+
+    Ok(())
+}
+
+/// Deletes NARs that have been pending for longer than the pending upload TTL.
+///
+/// These are unfinished chunked uploads (deleting the NAR deletes the upload
+/// session too) and uploads interrupted by a server crash. Their chunkrefs go
+/// with them, so the chunks become orphans and are reaped below.
+#[instrument(skip_all)]
+async fn run_reap_stale_pending_nars(state: &State) -> Result<()> {
+    let db = state.database().await?;
+
+    let ttl = ChronoDuration::from_std(state.config.chunked_upload.pending_upload_ttl)?;
+    let cutoff = Utc::now()
+        .checked_sub_signed(ttl)
+        .ok_or_else(|| anyhow!("Subtracting the pending upload TTL underflowed"))?;
+
+    let deletion = Nar::delete_many()
+        .filter(nar::Column::State.eq(NarState::PendingUpload))
+        .filter(nar::Column::CreatedAt.lt(cutoff))
+        .filter(nar::Column::HoldersCount.eq(0))
+        .exec(db)
+        .await?;
+
+    tracing::info!("Deleted {} stale pending NARs", deletion.rows_affected);
 
     Ok(())
 }

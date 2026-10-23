@@ -56,7 +56,7 @@ use crate::database::{AtticDatabase, ChunkGuard, NarGuard};
 const CONCURRENT_CHUNK_UPLOADS: usize = 10;
 
 /// Data of a chunk.
-enum ChunkData {
+pub(super) enum ChunkData {
     /// Some bytes in memory.
     Bytes(Bytes),
 
@@ -65,12 +65,12 @@ enum ChunkData {
 }
 
 /// Result of a chunk upload.
-struct UploadChunkResult {
-    guard: ChunkGuard,
-    deduplicated: bool,
+pub(super) struct UploadChunkResult {
+    pub(super) guard: ChunkGuard,
+    pub(super) deduplicated: bool,
 }
 
-trait UploadPathNarInfoExt {
+pub(super) trait UploadPathNarInfoExt {
     fn to_active_model(&self) -> object::ActiveModel;
 }
 
@@ -542,7 +542,7 @@ async fn upload_path_new_unchunked(
 /// Uploads a chunk with the desired compression.
 ///
 /// This will automatically perform deduplication if the chunk exists.
-async fn upload_chunk(
+pub(super) async fn upload_chunk(
     data: ChunkData,
     compression_type: CompressionType,
     compression_level: CompressionLevel,

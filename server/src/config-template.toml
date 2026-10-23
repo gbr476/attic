@@ -35,6 +35,9 @@ allowed-hosts = []
 # If set to false, simply knowing the NAR hash is enough for
 # an uploader to gain access to an existing NAR in the global
 # cache.
+#
+# Chunked uploads (see [chunked-upload]) are only offered when
+# this is false.
 #require-proof-of-possession = true
 
 # Database connection
@@ -130,6 +133,31 @@ interval = "12 hours"
 # Zero (default) means time-based garbage-collection is
 # disabled by default. You can enable it on a per-cache basis.
 #default-retention-period = "6 months"
+
+# Chunked uploads
+#
+# Clients split NARs into chunks themselves and only send the chunks
+# the server does not have yet, so deduplicated data is not transferred
+# and an interrupted upload can be resumed. They are only offered when
+# `require-proof-of-possession` is false: asking the server whether it
+# has a chunk reveals whether it holds data with that hash.
+[chunked-upload]
+# Whether to accept chunked uploads
+#enable = true
+
+# How long an unfinished upload is kept
+#
+# Its chunks are protected from garbage collection until then, so the
+# client can resume the upload without sending them again.
+#pending-upload-ttl = "1 day"
+
+# Whether to verify the NAR hash when an upload is finished
+#
+# The server reads the chunks back from storage to do so.
+#verify-nar-hash = true
+
+# Maximum number of chunks a client may submit in one request
+#max-chunks-per-request = 1024
 
 [jwt]
 # WARNING: Changing _anything_ in this section will break any existing

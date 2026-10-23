@@ -125,6 +125,11 @@ pub struct Config {
     #[serde(default = "Default::default")]
     pub garbage_collection: GarbageCollectionConfig,
 
+    /// Chunked uploads.
+    #[serde(rename = "chunked-upload")]
+    #[serde(default = "Default::default")]
+    pub chunked_upload: ChunkedUploadConfig,
+
     /// JSON Web Token.
     #[serde(default = "Default::default")]
     pub jwt: JWTConfig,
@@ -322,6 +327,66 @@ pub struct GarbageCollectionConfig {
     #[serde(rename = "default-retention-period")]
     #[serde(with = "humantime_serde", default = "default_default_retention_period")]
     pub default_retention_period: Duration,
+}
+
+/// Chunked upload configuration.
+///
+/// With chunked uploads, clients split NARs into chunks themselves and only
+/// send the chunks the server does not have yet, so deduplicated data is not
+/// transferred and interrupted uploads can be resumed. They are offered only
+/// when `require-proof-of-possession` is false: asking the server whether it
+/// has a chunk reveals whether it holds data with that hash, and attaching an
+/// existing chunk does not prove that the client has it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChunkedUploadConfig {
+    /// Whether to accept chunked uploads.
+    #[serde(default = "default_chunked_upload_enable")]
+    pub enable: bool,
+
+    /// How long an unfinished upload is kept.
+    ///
+    /// Chunks of an unfinished upload are protected from garbage collection,
+    /// so a client can resume the upload later without sending them again.
+    /// After this period, garbage collection removes the upload and its
+    /// chunks become ordinary orphans.
+    #[serde(rename = "pending-upload-ttl")]
+    #[serde(with = "humantime_serde", default = "default_pending_upload_ttl")]
+    pub pending_upload_ttl: Duration,
+
+    /// Whether to verify the NAR hash when an upload is finished.
+    ///
+    /// The server reads the chunks back from storage, which costs local I/O
+    /// for every uploaded NAR. Without it, the server only checks that the
+    /// chunks add up to the claimed NAR size.
+    #[serde(rename = "verify-nar-hash")]
+    #[serde(default = "default_verify_nar_hash")]
+    pub verify_nar_hash: bool,
+
+    /// Maximum number of chunks a client may submit in one request.
+    #[serde(rename = "max-chunks-per-request")]
+    #[serde(default = "default_max_chunks_per_request")]
+    pub max_chunks_per_request: usize,
+}
+
+impl Default for ChunkedUploadConfig {
+    fn default() -> Self {
+        Self {
+            enable: default_chunked_upload_enable(),
+            pending_upload_ttl: default_pending_upload_ttl(),
+            verify_nar_hash: default_verify_nar_hash(),
+            max_chunks_per_request: default_max_chunks_per_request(),
+        }
+    }
+}
+
+impl Config {
+    /// Returns whether chunked uploads are accepted.
+    pub fn chunked_upload_available(&self) -> bool {
+        self.chunked_upload.enable
+            && !self.require_proof_of_possession
+            && self.chunking.nar_size_threshold != 0
+    }
 }
 
 fn load_jwt_signing_config_from_env() -> JWTSigningConfig {
@@ -560,6 +625,22 @@ fn default_gc_interval() -> Duration {
 
 fn default_default_retention_period() -> Duration {
     Duration::ZERO
+}
+
+fn default_chunked_upload_enable() -> bool {
+    true
+}
+
+fn default_pending_upload_ttl() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
+}
+
+fn default_verify_nar_hash() -> bool {
+    true
+}
+
+fn default_max_chunks_per_request() -> usize {
+    1024
 }
 
 fn default_max_nar_info_size() -> usize {
